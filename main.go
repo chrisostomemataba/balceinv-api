@@ -5,7 +5,9 @@ import (
 
 	"github.com/chrisostomemataba/balceinv-api/config"
 	"github.com/chrisostomemataba/balceinv-api/database"
+	"github.com/chrisostomemataba/balceinv-api/routes"
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
@@ -37,6 +39,13 @@ func main() {
 	app.Use(recover.New())
 	app.Use(logger.New())
 
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     "http://localhost:3000",
+		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
+		AllowHeaders:     "Content-Type",
+		AllowCredentials: true, // required because you are sending cookies
+	}))
+
 	// Step 6 — Health check route so you can confirm the server is running
 	// Hit GET http://localhost:8080/health in your browser or with curl.
 	app.Get("/health", func(c *fiber.Ctx) error {
@@ -46,7 +55,10 @@ func main() {
 		})
 	})
 
-	// Step 7 — Start listening
+	// Step 7 — Setup routes
+	routes.Setup(app, db, cfg)
+
+	// Step 8 — Start listening
 	// The colon before the port number is required by Go's net package — it means
 	// "listen on all network interfaces on this port".
 	log.Printf("Server starting on port %s", cfg.Port)
