@@ -17,17 +17,25 @@ type resolvedItem struct {
 }
 
 type SaleService struct {
-	repo         *repository.SaleRepository
-	productRepo  *repository.ProductRepository
-	settingsRepo *repository.SettingsRepository
+	repo                *repository.SaleRepository
+	productRepo         *repository.ProductRepository
+	settingsRepo        *repository.SettingsRepository
+	notificationService *NotificationService
 }
 
+// Update NewSaleService signature
 func NewSaleService(
 	repo *repository.SaleRepository,
 	productRepo *repository.ProductRepository,
 	settingsRepo *repository.SettingsRepository,
+	notificationService *NotificationService,
 ) *SaleService {
-	return &SaleService{repo: repo, productRepo: productRepo, settingsRepo: settingsRepo}
+	return &SaleService{
+		repo:                repo,
+		productRepo:         productRepo,
+		settingsRepo:        settingsRepo,
+		notificationService: notificationService,
+	}
 }
 
 type SaleItemInput struct {
@@ -226,6 +234,16 @@ func (s *SaleService) CreateSale(input CreateSaleInput) (*SaleResult, error) {
 	if err := s.repo.CreateWithItems(sale, saleItems, movements, stockUpdates); err != nil {
 		return nil, err
 	}
+
+	// After s.repo.CreateWithItems succeeds, check stock levels for affected products.
+	// This is what triggers notifications to appear in the frontend without any manual action.
+	soldProductIDs := make([]uint, 0, len(resolved))
+	for _, r := range resolved {
+		soldProductIDs = append(soldProductIDs, r.product.ID)
+	}
+	// We deliberately ignore the error here — a failed stock check should never
+	// cause a completed sale to return an error to the cashier.
+	_ = s.notificationService.CheckStockLevels(soldProductIDs)
 
 	return &SaleResult{
 		ID:            sale.ID,
