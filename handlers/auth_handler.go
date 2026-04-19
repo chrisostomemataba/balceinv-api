@@ -32,7 +32,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		Value:    result.AccessToken,
 		HTTPOnly: true,
 		SameSite: "Lax",
-		MaxAge:   14400, //4 hours
+		MaxAge:   14400, // 4 hours
 	})
 
 	c.Cookie(&fiber.Cookie{
@@ -40,7 +40,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		Value:    result.RefreshToken,
 		HTTPOnly: true,
 		SameSite: "Lax",
-		MaxAge:   604800, //7 days
+		MaxAge:   604800, // 7 days
 	})
 
 	return utils.Success(c, "Logged in successfully", fiber.Map{"user": result.User})
@@ -67,7 +67,7 @@ func (h *AuthHandler) Refresh(c *fiber.Ctx) error {
 		return utils.Error(c, fiber.StatusForbidden, err.Error())
 	}
 
-	c.Cookie(&fiber.Cookie{Name: "access_token", Value: newAccess, HTTPOnly: true, SameSite: "Lax", MaxAge: 900})
+	c.Cookie(&fiber.Cookie{Name: "access_token", Value: newAccess, HTTPOnly: true, SameSite: "Lax", MaxAge: 14400})
 	c.Cookie(&fiber.Cookie{Name: "refresh_token", Value: newRefresh, HTTPOnly: true, SameSite: "Lax", MaxAge: 604800})
 
 	return utils.Success(c, "Session refreshed", nil)

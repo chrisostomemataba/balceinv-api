@@ -18,7 +18,7 @@ func GenerateAccessToken(payload TokenPayload, secret string) (string, error) {
 		"userId": payload.UserID,
 		"role":   payload.Role,
 		"email":  payload.Email,
-		"exp":    time.Now().Add(15 * time.Minute).Unix(),
+		"exp":    time.Now().Add(4 * time.Hour).Unix(),
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
