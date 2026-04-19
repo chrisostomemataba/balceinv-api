@@ -32,7 +32,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		Value:    result.AccessToken,
 		HTTPOnly: true,
 		SameSite: "Lax",
-		MaxAge:   900,
+		MaxAge:   14400, //4 hours
 	})
 
 	c.Cookie(&fiber.Cookie{
@@ -40,7 +40,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		Value:    result.RefreshToken,
 		HTTPOnly: true,
 		SameSite: "Lax",
-		MaxAge:   604800,
+		MaxAge:   604800, //7 days
 	})
 
 	return utils.Success(c, "Logged in successfully", fiber.Map{"user": result.User})
