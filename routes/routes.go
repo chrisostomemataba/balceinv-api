@@ -51,4 +51,17 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	perms.Get("/user/:id", permHandler.GetUserPermissions)
 	perms.Post("/assign-role", permHandler.AssignToRole)
 	perms.Post("/assign-user", permHandler.AssignToUser)
+
+	// Stock Movements
+	stockRepo := repository.NewStockMovementRepository(db)
+	stockService := services.NewStockMovementService(stockRepo, productRepo)
+	stockHandler := handlers.NewStockMovementHandler(stockService)
+
+	stock := app.Group("/api/stock-movements", protected)
+	stock.Get("/", stockHandler.GetAll)
+	stock.Get("/summary", stockHandler.GetSummary)
+	stock.Get("/date-range", stockHandler.GetByDateRange)
+	stock.Get("/product/:id", stockHandler.GetByProduct)
+	stock.Get("/:id", stockHandler.GetByID)
+	stock.Post("/", stockHandler.Create)
 }
