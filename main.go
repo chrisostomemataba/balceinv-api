@@ -42,8 +42,9 @@ func main() {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     "http://localhost:3000",
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders:     "Content-Type",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
 		AllowCredentials: true, // required because you are sending cookies
+		ExposeHeaders:    "Set-Cookie",
 	}))
 
 	// Step 6 — Health check route so you can confirm the server is running
