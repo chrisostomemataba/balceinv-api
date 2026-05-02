@@ -292,12 +292,12 @@ func (s *SaleService) buildReceiptData(
 	footer := "Thank you for your business!"
 
 	if settings != nil {
-		if settings.BusinessName != nil {
-			businessName = *settings.BusinessName
-		}
 		currency = settings.Currency
-		if settings.ReceiptFooter != nil {
-			footer = *settings.ReceiptFooter
+		if settings.Company.Name != "" {
+			businessName = settings.Company.Name
+		}
+		if settings.Company.ReceiptFooter != nil {
+			footer = *settings.Company.ReceiptFooter
 		}
 	}
 

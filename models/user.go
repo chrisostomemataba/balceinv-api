@@ -10,6 +10,7 @@ type User struct {
 	Email        string    `gorm:"uniqueIndex;not null"     json:"email"`
 	PasswordHash string    `gorm:"column:password_hash;not null" json:"-"`
 	RoleID       uint      `gorm:"not null"                 json:"role_id"`
+	CompanyID    uint      `gorm:"not null;index"           json:"company_id"`
 	CreatedAt    time.Time `gorm:"autoCreateTime"           json:"created_at"`
 	UpdatedAt    time.Time `gorm:"autoUpdateTime"           json:"updated_at"`
 
