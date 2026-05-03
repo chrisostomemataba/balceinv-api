@@ -25,10 +25,11 @@ type LoginInput struct {
 }
 
 type UserData struct {
-	ID    uint   `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
-	Role  string `json:"role"`
+	ID        uint   `json:"id"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Role      string `json:"role"`
+	CompanyID uint   `json:"company_id"`
 }
 
 type LoginResult struct {
@@ -48,9 +49,10 @@ func (s *AuthService) Login(input LoginInput) (*LoginResult, error) {
 	}
 
 	accessToken, err := utils.GenerateAccessToken(utils.TokenPayload{
-		UserID: user.ID,
-		Role:   user.Role.Name,
-		Email:  user.Email,
+		UserID:    user.ID,
+		CompanyID: user.CompanyID,
+		Role:      user.Role.Name,
+		Email:     user.Email,
 	}, s.accessSecret)
 	if err != nil {
 		return nil, err
@@ -71,7 +73,13 @@ func (s *AuthService) Login(input LoginInput) (*LoginResult, error) {
 	s.db.Create(&models.LoginLog{UserID: user.ID})
 
 	return &LoginResult{
-		User:         UserData{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role.Name},
+		User: UserData{
+			ID:        user.ID,
+			Name:      user.Name,
+			Email:     user.Email,
+			Role:      user.Role.Name,
+			CompanyID: user.CompanyID,
+		},
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 	}, nil
@@ -99,9 +107,10 @@ func (s *AuthService) Refresh(refreshToken string) (string, string, error) {
 	}
 
 	newAccess, err := utils.GenerateAccessToken(utils.TokenPayload{
-		UserID: user.ID,
-		Role:   user.Role.Name,
-		Email:  user.Email,
+		UserID:    user.ID,
+		CompanyID: user.CompanyID,
+		Role:      user.Role.Name,
+		Email:     user.Email,
 	}, s.accessSecret)
 	if err != nil {
 		return "", "", err
@@ -125,5 +134,11 @@ func (s *AuthService) GetCurrentUser(userID uint) (*UserData, error) {
 	if err := s.db.Preload("Role").First(&user, userID).Error; err != nil {
 		return nil, errors.New("user not found")
 	}
-	return &UserData{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role.Name}, nil
+	return &UserData{
+		ID:        user.ID,
+		Name:      user.Name,
+		Email:     user.Email,
+		Role:      user.Role.Name,
+		CompanyID: user.CompanyID,
+	}, nil
 }

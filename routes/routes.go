@@ -27,7 +27,6 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	notificationRepo := repository.NewNotificationRepository(db)
 	reportRepo := repository.NewReportRepository(db)
 
-
 	// --- Auth ---
 	authService := services.NewAuthService(db, cfg.AccessTokenSecret, cfg.RefreshTokenSecret)
 	authHandler := handlers.NewAuthHandler(authService)
@@ -154,4 +153,10 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	//--- Dashboard ---
 	dashboardHandler := handlers.NewDashboardHandler(db)
 	app.Get("/api/dashboard", protected, dashboardHandler.Get)
+
+	// --- Setup ---
+	setup := handlers.NewSetupHandler(services.NewSetupService(db))
+
+	app.Get("/api/setup/status", setup.Status)
+	app.Post("/api/setup", setup.Run)
 }

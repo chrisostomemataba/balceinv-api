@@ -8,17 +8,19 @@ import (
 )
 
 type TokenPayload struct {
-	UserID uint   `json:"userId"`
-	Role   string `json:"role"`
-	Email  string `json:"email"`
+	UserID    uint   `json:"userId"`
+	CompanyID uint   `json:"companyId"`
+	Role      string `json:"role"`
+	Email     string `json:"email"`
 }
 
 func GenerateAccessToken(payload TokenPayload, secret string) (string, error) {
 	claims := jwt.MapClaims{
-		"userId": payload.UserID,
-		"role":   payload.Role,
-		"email":  payload.Email,
-		"exp":    time.Now().Add(4 * time.Hour).Unix(),
+		"userId":    payload.UserID,
+		"companyId": payload.CompanyID,
+		"role":      payload.Role,
+		"email":     payload.Email,
+		"exp":       time.Now().Add(4 * time.Hour).Unix(),
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
@@ -53,9 +55,12 @@ func VerifyToken(tokenStr, secret string) (*TokenPayload, error) {
 		return nil, errors.New("invalid userId in token")
 	}
 
+	companyIDFloat, _ := claims["companyId"].(float64)
+
 	return &TokenPayload{
-		UserID: uint(userIDFloat),
-		Role:   claims["role"].(string),
-		Email:  claims["email"].(string),
+		UserID:    uint(userIDFloat),
+		CompanyID: uint(companyIDFloat),
+		Role:      claims["role"].(string),
+		Email:     claims["email"].(string),
 	}, nil
 }
