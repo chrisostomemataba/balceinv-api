@@ -15,11 +15,12 @@ func Migrate(db *gorm.DB) error {
 
 	err := db.AutoMigrate(
 		// Level 1 — no foreign keys, migrate first
+		&models.Company{},      // new — must come before User and Settings
 		&models.Role{},
 		&models.Permission{},
 		&models.Supplier{},
 
-		// Level 2 — depends on Role
+		// Level 2 — depends on Role and Company
 		&models.User{},
 
 		// Level 3 — depends on Role + Permission
@@ -28,16 +29,18 @@ func Migrate(db *gorm.DB) error {
 		// Level 3 — depends on User + Permission
 		&models.UserPermission{},
 
-		// Level 3 — depends on User
+		// Level 3 — depends on User + Company
 		&models.Session{},
 		&models.LoginLog{},
-		&models.Settings{},
+		&models.Settings{},     // now has CompanyID
+
+		// Catalog — no foreign keys, standalone reference data
+		&models.CatalogProduct{}, // new
 
 		// Level 3 — depends on Supplier + User
 		&models.Purchase{},
 
-		// Level 4 — depends on Purchase + Product (Product not yet migrated,
-		// but ProductID is nullable so SQLite will not complain)
+		// Level 4 — depends on Purchase + Product
 		&models.PurchaseItem{},
 
 		// Level 2 — Product has no FK to anything above
