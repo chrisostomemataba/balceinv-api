@@ -157,6 +157,11 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	// --- Setup ---
 	setup := handlers.NewSetupHandler(services.NewSetupService(db))
 
+	// -- Products Catalogue ---
+	catalog := handlers.NewCatalogHandler(db)
+	app.Get("/api/catalog", protected, catalog.GetAll)
+
+
 	app.Get("/api/setup/status", setup.Status)
 	app.Post("/api/setup", setup.Run)
 }

@@ -38,6 +38,7 @@ type Product struct {
 	StockMovements []StockMovement `gorm:"foreignKey:ProductID" json:"stock_movements,omitempty"`
 	PriceHistory   []PriceHistory  `gorm:"foreignKey:ProductID" json:"price_history,omitempty"`
 	StockAlerts    []StockAlert    `gorm:"foreignKey:ProductID" json:"stock_alerts,omitempty"`
+	Metadata 		JSONMap 		`gorm:"type:text;default:null" json:"metadata"`
 }
 
 func (Product) TableName() string { return "products" }
