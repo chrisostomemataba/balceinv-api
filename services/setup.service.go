@@ -42,8 +42,10 @@ func (s *SetupService) Run(input SetupInput) error {
 	}
 
 	var company models.Company
+	var adminRoleID uint
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		// 1. Create the company record
 		company = models.Company{
 			Name:         input.BusinessName,
 			BusinessType: input.BusinessType,
@@ -55,27 +57,31 @@ func (s *SetupService) Run(input SetupInput) error {
 			return err
 		}
 
+		// 2. Find the existing "Admin" role OR create it.
+		//    Using FirstOrCreate avoids a duplicate if the seed script already inserted it.
 		adminRole := models.Role{Name: "Admin"}
-		if err := tx.Create(&adminRole).Error; err != nil {
+		if err := tx.Where("name = ?", "Admin").FirstOrCreate(&adminRole).Error; err != nil {
 			return err
 		}
+		adminRoleID = adminRole.ID
 
+		// 3. Create the owner user and link it to the Admin role
 		hash, err := utils.HashPassword(input.OwnerPassword)
 		if err != nil {
 			return err
 		}
-
 		owner := models.User{
 			Name:         input.OwnerName,
 			Email:        input.OwnerEmail,
 			PasswordHash: hash,
-			RoleID:       adminRole.ID,
+			RoleID:       adminRoleID,
 			CompanyID:    company.ID,
 		}
 		if err := tx.Create(&owner).Error; err != nil {
 			return err
 		}
 
+		// 4. Create default company settings
 		settings := models.Settings{
 			CompanyID:           company.ID,
 			TaxRate:             18.0,
@@ -101,11 +107,44 @@ func (s *SetupService) Run(input SetupInput) error {
 		return err
 	}
 
+	// 5. Grant ALL existing permissions to the Admin role.
+	//    This runs after the transaction so permissions seeded by the seed script are included.
+	//    The owner (Admin) becomes a true super-admin with full system access.
+	if err := s.assignAllPermissionsToRole(adminRoleID); err != nil {
+		// Log but don't fail — the company was created. Admin can assign permissions via UI.
+		fmt.Printf("warn: could not assign permissions to Admin role: %v\n", err)
+	}
+
 	if err := s.seedCatalog(company.ID, company.BusinessType); err != nil {
 		fmt.Printf("catalog seed skipped for %s: %v\n", company.BusinessType, err)
 	}
 
 	return s.db.Model(&company).Update("is_seeded", true).Error
+}
+
+
+func (s *SetupService) assignAllPermissionsToRole(roleID uint) error {
+	// Load every permission that currently exists
+	var perms []models.Permission
+	if err := s.db.Find(&perms).Error; err != nil {
+		return err
+	}
+	if len(perms) == 0 {
+		return nil
+	}
+
+	// Remove any previous assignments for this role
+	if err := s.db.Where("role_id = ?", roleID).Delete(&models.RolePermission{}).Error; err != nil {
+		return err
+	}
+
+	// Build and insert one row per permission
+	rows := make([]models.RolePermission, len(perms))
+	for i, p := range perms {
+		rows[i] = models.RolePermission{RoleID: roleID, PermissionID: p.ID}
+	}
+
+	return s.db.Create(&rows).Error
 }
 
 func (s *SetupService) seedCatalog(companyID uint, businessType string) error {
