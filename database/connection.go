@@ -3,15 +3,11 @@ package database
 import (
 	"log"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// Connect opens the SQLite file at dbPath and returns a ready GORM instance.
-// We also set two SQLite pragmas that matter for a POS system:
-//   - WAL mode: allows reads while a write is happening (important for multi-user LAN use)
-//   - foreign_keys ON: enforces your ON DELETE CASCADE rules from the schema
 func Connect(dbPath string) (*gorm.DB, error) {
 	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Warn),
@@ -20,7 +16,6 @@ func Connect(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Get the underlying sql.DB so we can run raw PRAGMA statements
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, err
