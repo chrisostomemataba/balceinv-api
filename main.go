@@ -5,37 +5,35 @@ import (
 
 	"github.com/chrisostomemataba/balceinv-api/config"
 	"github.com/chrisostomemataba/balceinv-api/database"
+	"github.com/chrisostomemataba/balceinv-api/models"
 	"github.com/chrisostomemataba/balceinv-api/routes"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"gorm.io/gorm"
 )
 
+
 func main() {
-	// Step 1 — Load configuration from .env
 	cfg := config.Load()
 
-	// Step 2 — Connect to the SQLite database
 	db, err := database.Connect(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// Step 3 — Run migrations so all tables exist before the server accepts requests
 	if err := database.Migrate(db); err != nil {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
-	// Step 4 — Create the Fiber app
-	// JSONEncoder and JSONDecoder use the standard library — no extra dependency needed.
+	// Seed permissions if not already seeded
+	seedPermissions(db)
+
 	app := fiber.New(fiber.Config{
 		AppName: "BalceInv API",
 	})
 
-	// Step 5 — Register global middleware
-	// recover catches any panic in a handler and returns a 500 instead of crashing the server.
-	// logger prints each request method, path, status, and duration to the terminal.
 	app.Use(recover.New())
 	app.Use(logger.New())
 
@@ -43,12 +41,10 @@ func main() {
 		AllowOrigins:     "http://localhost:3000",
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
 		AllowHeaders:     "Origin,Content-Type,Accept,Authorization",
-		AllowCredentials: true, // required because you are sending cookies
+		AllowCredentials: true,
 		ExposeHeaders:    "Set-Cookie",
 	}))
 
-	// Step 6 — Health check route so you can confirm the server is running
-	// Hit GET http://localhost:8080/health in your browser or with curl.
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"status":  "ok",
@@ -56,14 +52,60 @@ func main() {
 		})
 	})
 
-	// Step 7 — Setup routes
 	routes.Setup(app, db, cfg)
 
-	// Step 8 — Start listening
-	// The colon before the port number is required by Go's net package — it means
-	// "listen on all network interfaces on this port".
 	log.Printf("Server starting on port %s", cfg.Port)
 	if err := app.Listen(":" + cfg.Port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func seedPermissions(db *gorm.DB) {
+	// Check if permissions already exist — if yes skip entirely
+	var count int64
+	db.Model(&models.Permission{}).Count(&count)
+	if count > 0 {
+		log.Println("Permissions already seeded, skipping.")
+		return
+	}
+
+	resources := []string{
+		"products", "sales", "users", "roles",
+		"stock_movements", "reports", "settings", "notifications",
+	}
+	actions := []string{"view", "create", "edit", "delete"}
+
+	for _, resource := range resources {
+		for _, action := range actions {
+			name := resource + ":" + action
+			perm := models.Permission{
+				Name:     name,
+				Resource: resource,
+				Action:   action,
+			}
+			db.Where("name = ?", name).FirstOrCreate(&perm)
+		}
+	}
+
+	log.Println("Permissions seeded.")
+
+	// Assign to Admin role only if it exists
+	var adminRole models.Role
+	if err := db.Where("name = ?", "Admin").First(&adminRole).Error; err != nil {
+		log.Println("Admin role not found — will be assigned after /api/setup is run.")
+		return
+	}
+
+	var allPerms []models.Permission
+	db.Find(&allPerms)
+
+	for _, perm := range allPerms {
+		rp := models.RolePermission{
+			RoleID:       adminRole.ID,
+			PermissionID: perm.ID,
+		}
+		db.Where("role_id = ? AND permission_id = ?", rp.RoleID, rp.PermissionID).FirstOrCreate(&rp)
+	}
+
+	log.Println("Admin permissions assigned.")
 }
