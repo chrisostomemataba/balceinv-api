@@ -20,6 +20,7 @@ func NewSettingsService(repo *repository.SettingsRepository) *SettingsService {
 }
 
 type UpdateSettingsInput struct {
+	// → companies table
 	BusinessName    *string `json:"business_name"`
 	BusinessAddress *string `json:"business_address"`
 	BusinessPhone   *string `json:"business_phone"`
@@ -28,30 +29,46 @@ type UpdateSettingsInput struct {
 	ReceiptFooter   *string `json:"receipt_footer"`
 	PrimaryColor    *string `json:"primary_color"`
 
+	// → settings table: currency & tax
 	TaxRate        *float64 `json:"tax_rate"`
 	Currency       *string  `json:"currency"`
 	CurrencySymbol *string  `json:"currency_symbol"`
 
+	// → settings table: format
 	DateFormat          *string `json:"date_format"`
 	ReceiptNumberFormat *string `json:"receipt_number_format"`
 
+	// → settings table: EFD
 	EFDEnabled  *bool   `json:"efd_enabled"`
 	EFDEndpoint *string `json:"efd_endpoint"`
 	EFDApiKey   *string `json:"efd_api_key"`
 
+	// → settings table: notifications
 	LowStockThreshold         *int    `json:"low_stock_threshold"`
 	EmailNotificationsEnabled *bool   `json:"email_notifications_enabled"`
 	NotificationEmail         *string `json:"notification_email"`
 	AlertSoundEnabled         *bool   `json:"alert_sound_enabled"`
+	AlertOnLowStock           *bool   `json:"alert_on_low_stock"`
+	AlertOnOutOfStock         *bool   `json:"alert_on_out_of_stock"`
+	AlertOnDeadStock          *bool   `json:"alert_on_dead_stock"`
+	DeadStockDays             *int    `json:"dead_stock_days"`
 
-	AlertOnLowStock   *bool `json:"alert_on_low_stock"`
-	AlertOnOutOfStock *bool `json:"alert_on_out_of_stock"`
-	AlertOnDeadStock  *bool `json:"alert_on_dead_stock"`
-	DeadStockDays     *int  `json:"dead_stock_days"`
-
+	// → settings table: receipt / hardware
 	PrintReceiptAutomatically *bool `json:"print_receipt_automatically"`
 	ShowTaxOnReceipt          *bool `json:"show_tax_on_receipt"`
 	ShowBarcodesOnReceipt     *bool `json:"show_barcodes_on_receipt"`
+
+	// → settings table: printer hardware
+	// PrinterEnabled turns printing on/off without clearing the port config.
+	// PrinterPort is the OS device path e.g. "COM3" or "/dev/usb/lp0".
+	// PrinterBaudRate matters only for serial RS-232 printers (typically 9600 or 19200).
+	// PrinterPaperWidth is 58 or 80 (mm).
+	// OpenCashDrawer sends the ESC/POS DK pulse to open the drawer after printing.
+	PrinterEnabled    *bool   `json:"printer_enabled"`
+	PrinterPort       *string `json:"printer_port"`
+	PrinterBaudRate   *int    `json:"printer_baud_rate"`
+	PrinterPaperWidth *int    `json:"printer_paper_width"`
+	OpenCashDrawer    *bool   `json:"open_cash_drawer"`
 }
 
 func (s *SettingsService) GetOrCreate() (*models.Settings, error) {
@@ -68,6 +85,7 @@ func (s *SettingsService) Update(input UpdateSettingsInput, updatedBy uint) (*mo
 		return nil, err
 	}
 
+	// ── Company table updates ─────────────────────────────────────────────
 	companyUpdates := map[string]interface{}{}
 	if input.BusinessName != nil {
 		companyUpdates["name"] = *input.BusinessName
@@ -90,14 +108,15 @@ func (s *SettingsService) Update(input UpdateSettingsInput, updatedBy uint) (*mo
 	if input.PrimaryColor != nil {
 		companyUpdates["primary_color"] = *input.PrimaryColor
 	}
-
 	if len(companyUpdates) > 0 {
 		if err := s.repo.UpdateCompany(settings.CompanyID, companyUpdates); err != nil {
 			return nil, err
 		}
 	}
 
+	// ── Settings table updates ────────────────────────────────────────────
 	settingsUpdates := map[string]interface{}{"updated_by": updatedBy}
+
 	if input.TaxRate != nil {
 		settingsUpdates["tax_rate"] = *input.TaxRate
 	}
@@ -154,6 +173,23 @@ func (s *SettingsService) Update(input UpdateSettingsInput, updatedBy uint) (*mo
 	}
 	if input.ShowBarcodesOnReceipt != nil {
 		settingsUpdates["show_barcodes_on_receipt"] = *input.ShowBarcodesOnReceipt
+	}
+
+	// Printer hardware fields
+	if input.PrinterEnabled != nil {
+		settingsUpdates["printer_enabled"] = *input.PrinterEnabled
+	}
+	if input.PrinterPort != nil {
+		settingsUpdates["printer_port"] = *input.PrinterPort
+	}
+	if input.PrinterBaudRate != nil {
+		settingsUpdates["printer_baud_rate"] = *input.PrinterBaudRate
+	}
+	if input.PrinterPaperWidth != nil {
+		settingsUpdates["printer_paper_width"] = *input.PrinterPaperWidth
+	}
+	if input.OpenCashDrawer != nil {
+		settingsUpdates["open_cash_drawer"] = *input.OpenCashDrawer
 	}
 
 	return s.repo.UpdateSettings(settings.ID, settingsUpdates)

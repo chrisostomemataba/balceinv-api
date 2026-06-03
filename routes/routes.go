@@ -14,18 +14,15 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	protected := middleware.Protected(cfg.AccessTokenSecret)
 
 	// --- Repositories ---
-	// All repositories are created first because services depend on them.
-	// Creating them here in one place means we never accidentally create
-	// two instances of the same repository pointing at the same database.
-	userRepo := repository.NewUserRepository(db)
-	roleRepo := repository.NewRoleRepository(db)
-	permRepo := repository.NewPermissionRepository(db)
-	productRepo := repository.NewProductRepository(db)
-	saleRepo := repository.NewSaleRepository(db)
-	stockRepo := repository.NewStockMovementRepository(db)
-	settingsRepo := repository.NewSettingsRepository(db)
+	userRepo         := repository.NewUserRepository(db)
+	roleRepo         := repository.NewRoleRepository(db)
+	permRepo         := repository.NewPermissionRepository(db)
+	productRepo      := repository.NewProductRepository(db)
+	saleRepo         := repository.NewSaleRepository(db)
+	stockRepo        := repository.NewStockMovementRepository(db)
+	settingsRepo     := repository.NewSettingsRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
-	reportRepo := repository.NewReportRepository(db)
+	reportRepo       := repository.NewReportRepository(db)
 
 	// --- Auth ---
 	authService := services.NewAuthService(db, cfg.AccessTokenSecret, cfg.RefreshTokenSecret)
@@ -87,9 +84,6 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	products.Delete("/:id", productHandler.Delete)
 
 	// --- Notifications ---
-	// Notifications are declared before sales because the sale service
-	// needs notificationService as a dependency. Declaring it first
-	// means we can pass it directly without a forward reference issue.
 	notificationService := services.NewNotificationService(notificationRepo, settingsRepo, productRepo)
 	notificationHandler := handlers.NewNotificationHandler(notificationService)
 
@@ -102,9 +96,6 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	notifs.Delete("/:id", notificationHandler.Delete)
 
 	// --- Sales ---
-	// Sales is wired after notifications so notificationService is available.
-	// settingsRepo is passed so the sale service can read tax rate and receipt format.
-	// notificationService is passed so stock alerts fire automatically after each sale.
 	saleService := services.NewSaleService(saleRepo, productRepo, settingsRepo, notificationService)
 	saleHandler := handlers.NewSaleHandler(saleService)
 
@@ -138,7 +129,15 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	settingsGroup.Post("/test-efd", settingsHandler.TestEFD)
 	settingsGroup.Post("/upload-logo", settingsHandler.UploadLogo)
 
-	//--- Reports ---
+	// --- Print ---
+	printService := services.NewPrintService(saleRepo, settingsRepo)
+	printHandler := handlers.NewPrintHandler(printService, settingsService)
+
+	print := app.Group("/api/print", protected)
+	print.Post("/receipt", printHandler.PrintReceipt)
+	print.Get("/status", printHandler.PrinterStatus)
+
+	// --- Reports ---
 	reportService := services.NewReportService(reportRepo)
 	reportHandler := handlers.NewReportHandler(reportService)
 
@@ -150,18 +149,16 @@ func Setup(app *fiber.App, db *gorm.DB, cfg *config.Config) {
 	reports.Get("/financial", reportHandler.GetFinancial)
 	reports.Get("/daily-trend", reportHandler.GetDailyTrend)
 
-	//--- Dashboard ---
+	// --- Dashboard ---
 	dashboardHandler := handlers.NewDashboardHandler(db)
 	app.Get("/api/dashboard", protected, dashboardHandler.Get)
 
 	// --- Setup ---
 	setup := handlers.NewSetupHandler(services.NewSetupService(db))
-
-	// -- Products Catalogue ---
-	catalog := handlers.NewCatalogHandler(db)
-	app.Get("/api/catalog", protected, catalog.GetAll)
-
-
 	app.Get("/api/setup/status", setup.Status)
 	app.Post("/api/setup", setup.Run)
+
+	// --- Catalog ---
+	catalog := handlers.NewCatalogHandler(db)
+	app.Get("/api/catalog", protected, catalog.GetAll)
 }
