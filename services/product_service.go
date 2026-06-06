@@ -12,76 +12,110 @@ import (
 )
 
 type ProductService struct {
-	repo *repository.ProductRepository
+	productRepository *repository.ProductRepository
 }
 
-func NewProductService(repo *repository.ProductRepository) *ProductService {
-	return &ProductService{repo: repo}
+func NewProductService(productRepository *repository.ProductRepository) *ProductService {
+	return &ProductService{productRepository: productRepository}
 }
 
 type CreateProductInput struct {
-	Name           string   `json:"name"`
-	SKU            string   `json:"sku"`
-	Barcode        *string  `json:"barcode"`
-	Price          float64  `json:"price"`
-	CostPrice      float64  `json:"cost_price"`
-	Quantity       int      `json:"quantity"`
-	MinStock       int      `json:"min_stock"`
-	WholesalePrice *float64 `json:"wholesale_price"`
-	WholesaleMin   int      `json:"wholesale_min"`
-	Category       *string  `json:"category"`
-	Unit           string   `json:"unit"`
-	PiecesPerUnit  int      `json:"pieces_per_unit"`
+	Name           string         `json:"name"`
+	SKU            string         `json:"sku"`
+	Barcode        *string        `json:"barcode"`
+	ParentID       *uint          `json:"parent_id"`
+	VariantLabel   string         `json:"variant_label"`
+	Price          float64        `json:"price"`
+	CostPrice      float64        `json:"cost_price"`
+	Quantity       int            `json:"quantity"`
+	MinStock       int            `json:"min_stock"`
+	WholesalePrice *float64       `json:"wholesale_price"`
+	WholesaleMin   int            `json:"wholesale_min"`
+	Category       *string        `json:"category"`
+	Unit           string         `json:"unit"`
+	PiecesPerUnit  int            `json:"pieces_per_unit"`
+	Image          *string        `json:"image"`
+	Metadata       models.JSONMap `json:"metadata"`
 }
 
 type UpdateProductInput struct {
-	Name           string   `json:"name"`
-	Price          float64  `json:"price"`
-	CostPrice      float64  `json:"cost_price"`
-	MinStock       int      `json:"min_stock"`
-	WholesalePrice *float64 `json:"wholesale_price"`
-	WholesaleMin   int      `json:"wholesale_min"`
-	Category       *string  `json:"category"`
-	Unit           string   `json:"unit"`
-	PiecesPerUnit  int      `json:"pieces_per_unit"`
+	Name           string         `json:"name"`
+	VariantLabel   string         `json:"variant_label"`
+	Price          float64        `json:"price"`
+	CostPrice      float64        `json:"cost_price"`
+	MinStock       int            `json:"min_stock"`
+	WholesalePrice *float64       `json:"wholesale_price"`
+	WholesaleMin   int            `json:"wholesale_min"`
+	Category       *string        `json:"category"`
+	Unit           string         `json:"unit"`
+	PiecesPerUnit  int            `json:"pieces_per_unit"`
+	Image          *string        `json:"image"`
+	Metadata       models.JSONMap `json:"metadata"`
 }
 
 type UploadResult struct {
-	Created int                  `json:"created"`
-	Errors  []map[string]string  `json:"errors"`
+	Created int                 `json:"created"`
+	Errors  []map[string]string `json:"errors"`
 }
 
-func (s *ProductService) GetAll(search, category string) ([]models.Product, error) {
-	return s.repo.FindAll(search, category)
+func (service *ProductService) GetAll(search, category string) ([]models.Product, error) {
+	return service.productRepository.FindAll(search, category)
 }
 
-func (s *ProductService) GetByID(id uint) (*models.Product, error) {
-	product, err := s.repo.FindByID(id)
+func (service *ProductService) GetByID(id uint) (*models.Product, error) {
+	product, err := service.productRepository.FindByID(id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, errors.New("product not found")
 	}
 	return product, err
 }
 
-func (s *ProductService) Create(input CreateProductInput) (*models.Product, error) {
-	// Reject duplicate SKU before attempting insert
-	existing, err := s.repo.FindBySKU(input.SKU)
-	if err == nil && existing != nil {
+func (service *ProductService) GetVariants(parentID uint) ([]models.Product, error) {
+	_, err := service.productRepository.FindByID(parentID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errors.New("product not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return service.productRepository.FindVariantsByParentID(parentID)
+}
+
+func (service *ProductService) Create(input CreateProductInput) (*models.Product, error) {
+	existingProduct, err := service.productRepository.FindBySKU(input.SKU)
+	if err == nil && existingProduct != nil {
 		return nil, errors.New("product with this SKU already exists")
+	}
+
+	if input.ParentID != nil {
+		_, err := service.productRepository.FindByID(*input.ParentID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("parent product not found")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if input.VariantLabel == "" {
+			return nil, errors.New("variant label is required when parent_id is set")
+		}
 	}
 
 	unit := input.Unit
 	if unit == "" {
 		unit = "pcs"
 	}
+
 	piecesPerUnit := input.PiecesPerUnit
 	if piecesPerUnit == 0 {
 		piecesPerUnit = 1
 	}
+
 	minStock := input.MinStock
 	if minStock == 0 {
 		minStock = 5
 	}
+
 	wholesaleMin := input.WholesaleMin
 	if wholesaleMin == 0 {
 		wholesaleMin = 10
@@ -91,6 +125,8 @@ func (s *ProductService) Create(input CreateProductInput) (*models.Product, erro
 		Name:           input.Name,
 		SKU:            input.SKU,
 		Barcode:        input.Barcode,
+		ParentID:       input.ParentID,
+		VariantLabel:   input.VariantLabel,
 		Price:          input.Price,
 		CostPrice:      input.CostPrice,
 		Quantity:       input.Quantity,
@@ -100,29 +136,30 @@ func (s *ProductService) Create(input CreateProductInput) (*models.Product, erro
 		Category:       input.Category,
 		Unit:           unit,
 		PiecesPerUnit:  piecesPerUnit,
+		Image:          input.Image,
+		Metadata:       input.Metadata,
 	}
 
-	if err := s.repo.Create(product); err != nil {
+	if err := service.productRepository.Create(product); err != nil {
 		return nil, err
 	}
 
-	// If initial stock was provided, record it as an adjustment movement
 	if input.Quantity > 0 {
-		ref := "Initial stock"
-		s.repo.CreateStockMovement(&models.StockMovement{
+		reference := "Initial stock"
+		service.productRepository.CreateStockMovement(&models.StockMovement{
 			ProductID:   product.ID,
 			Change:      input.Quantity,
 			NewQuantity: input.Quantity,
 			Reason:      "adjust",
-			Reference:   &ref,
+			Reference:   &reference,
 		})
 	}
 
 	return product, nil
 }
 
-func (s *ProductService) Update(id uint, input UpdateProductInput, userID *uint) (*models.Product, error) {
-	product, err := s.repo.FindByID(id)
+func (service *ProductService) Update(id uint, input UpdateProductInput, userID *uint) (*models.Product, error) {
+	product, err := service.productRepository.FindByID(id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, errors.New("product not found")
 	}
@@ -130,11 +167,10 @@ func (s *ProductService) Update(id uint, input UpdateProductInput, userID *uint)
 		return nil, err
 	}
 
-	// Record price history if the price actually changed
 	if input.Price != 0 && input.Price != product.Price {
 		oldPrice := product.Price
 		newPrice := input.Price
-		s.repo.CreatePriceHistory(&models.PriceHistory{
+		service.productRepository.CreatePriceHistory(&models.PriceHistory{
 			ProductID: id,
 			OldPrice:  &oldPrice,
 			NewPrice:  &newPrice,
@@ -143,6 +179,7 @@ func (s *ProductService) Update(id uint, input UpdateProductInput, userID *uint)
 	}
 
 	product.Name = input.Name
+	product.VariantLabel = input.VariantLabel
 	product.Price = input.Price
 	product.CostPrice = input.CostPrice
 	product.MinStock = input.MinStock
@@ -151,104 +188,122 @@ func (s *ProductService) Update(id uint, input UpdateProductInput, userID *uint)
 	product.Category = input.Category
 	product.Unit = input.Unit
 	product.PiecesPerUnit = input.PiecesPerUnit
+	product.Metadata = input.Metadata
 
-	if err := s.repo.Update(product); err != nil {
+	if input.Image != nil {
+		product.Image = input.Image
+	}
+
+	if err := service.productRepository.Update(product); err != nil {
 		return nil, err
 	}
 
 	return product, nil
 }
 
-func (s *ProductService) Delete(id uint) error {
-	_, err := s.repo.FindByID(id)
+func (service *ProductService) UpdateImage(id uint, imageDataURI string) (*models.Product, error) {
+	product, err := service.productRepository.FindByID(id)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errors.New("product not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	product.Image = &imageDataURI
+
+	if err := service.productRepository.Update(product); err != nil {
+		return nil, err
+	}
+
+	return product, nil
+}
+
+func (service *ProductService) Delete(id uint) error {
+	_, err := service.productRepository.FindByID(id)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("product not found")
 	}
-	return s.repo.Delete(id)
+	return service.productRepository.Delete(id)
 }
 
-func (s *ProductService) GetLowStock() ([]models.Product, error) {
-	return s.repo.FindLowStock()
+func (service *ProductService) GetLowStock() ([]models.Product, error) {
+	return service.productRepository.FindLowStock()
 }
 
-// UploadExcel reads an uploaded .xlsx file and creates products row by row.
-// Rows that fail (duplicate SKU, bad data) are collected as errors and returned
-// alongside the count of successful inserts — the upload never stops on a single error.
-func (s *ProductService) UploadExcel(fileHeader *multipart.FileHeader) (*UploadResult, error) {
+func (service *ProductService) UploadExcel(fileHeader *multipart.FileHeader) (*UploadResult, error) {
 	file, err := fileHeader.Open()
 	if err != nil {
 		return nil, errors.New("could not open uploaded file")
 	}
 	defer file.Close()
 
-	xlsx, err := excelize.OpenReader(file)
+	spreadsheet, err := excelize.OpenReader(file)
 	if err != nil {
 		return nil, errors.New("could not parse Excel file")
 	}
 
-	// Read from the first sheet, starting at row 2 (row 1 is the header)
-	rows, err := xlsx.GetRows(xlsx.GetSheetName(0))
+	rows, err := spreadsheet.GetRows(spreadsheet.GetSheetName(0))
 	if err != nil {
 		return nil, errors.New("could not read sheet")
 	}
 
 	result := &UploadResult{Errors: []map[string]string{}}
 
-	// Map header names to column indices so order does not matter
 	if len(rows) < 2 {
 		return result, nil
 	}
 
 	headers := rows[0]
-	colIndex := map[string]int{}
-	for i, h := range headers {
-		colIndex[h] = i
+	columnIndexByName := map[string]int{}
+	for index, header := range headers {
+		columnIndexByName[header] = index
 	}
 
-	col := func(row []string, name string) string {
-		i, ok := colIndex[name]
-		if !ok || i >= len(row) {
+	getColumnValue := func(row []string, columnName string) string {
+		columnIndex, exists := columnIndexByName[columnName]
+		if !exists || columnIndex >= len(row) {
 			return ""
 		}
-		return row[i]
+		return row[columnIndex]
 	}
 
-	for rowNum, row := range rows[1:] {
-		sku := col(row, "sku")
+	for rowNumber, row := range rows[1:] {
+		sku := getColumnValue(row, "sku")
 		if sku == "" {
 			result.Errors = append(result.Errors, map[string]string{
-				"row": fmt.Sprintf("%d", rowNum+2), "error": "missing sku",
+				"row": fmt.Sprintf("%d", rowNumber+2), "error": "missing sku",
 			})
 			continue
 		}
 
 		input := CreateProductInput{
-			Name:      col(row, "name"),
+			Name:      getColumnValue(row, "name"),
 			SKU:       sku,
-			Price:     parseFloat(col(row, "price")),
-			CostPrice: parseFloat(col(row, "costPrice")),
-			Quantity:  parseInt(col(row, "quantity")),
-			MinStock:  parseInt(col(row, "minStock")),
-			Unit:      col(row, "unit"),
+			Price:     parseFloat(getColumnValue(row, "price")),
+			CostPrice: parseFloat(getColumnValue(row, "costPrice")),
+			Quantity:  parseInt(getColumnValue(row, "quantity")),
+			MinStock:  parseInt(getColumnValue(row, "minStock")),
+			Unit:      getColumnValue(row, "unit"),
 		}
 
-		if b := col(row, "barcode"); b != "" {
-			input.Barcode = &b
+		if barcodeValue := getColumnValue(row, "barcode"); barcodeValue != "" {
+			input.Barcode = &barcodeValue
 		}
-		if c := col(row, "category"); c != "" {
-			input.Category = &c
+		if categoryValue := getColumnValue(row, "category"); categoryValue != "" {
+			input.Category = &categoryValue
 		}
-		if wp := parseFloat(col(row, "wholesalePrice")); wp > 0 {
-			input.WholesalePrice = &wp
+		if wholesalePriceValue := parseFloat(getColumnValue(row, "wholesalePrice")); wholesalePriceValue > 0 {
+			input.WholesalePrice = &wholesalePriceValue
 		}
-		if wm := parseInt(col(row, "wholesaleMin")); wm > 0 {
-			input.WholesaleMin = wm
+		if wholesaleMinValue := parseInt(getColumnValue(row, "wholesaleMin")); wholesaleMinValue > 0 {
+			input.WholesaleMin = wholesaleMinValue
 		}
-		if ppu := parseInt(col(row, "piecesPerUnit")); ppu > 0 {
-			input.PiecesPerUnit = ppu
+		if piecesPerUnitValue := parseInt(getColumnValue(row, "piecesPerUnit")); piecesPerUnitValue > 0 {
+			input.PiecesPerUnit = piecesPerUnitValue
 		}
 
-		if _, err := s.Create(input); err != nil {
+		if _, err := service.Create(input); err != nil {
 			result.Errors = append(result.Errors, map[string]string{
 				"sku": sku, "error": err.Error(),
 			})
@@ -261,12 +316,10 @@ func (s *ProductService) UploadExcel(fileHeader *multipart.FileHeader) (*UploadR
 	return result, nil
 }
 
-// GetTemplate returns the bytes of a pre-filled .xlsx template file
-// that the user can download, fill in, and upload back.
-func (s *ProductService) GetTemplate() ([]byte, error) {
-	f := excelize.NewFile()
-	sheet := "Products"
-	f.SetSheetName("Sheet1", sheet)
+func (service *ProductService) GetTemplate() ([]byte, error) {
+	spreadsheet := excelize.NewFile()
+	sheetName := "Products"
+	spreadsheet.SetSheetName("Sheet1", sheetName)
 
 	headers := []string{
 		"name", "sku", "barcode", "price", "costPrice",
@@ -274,38 +327,35 @@ func (s *ProductService) GetTemplate() ([]byte, error) {
 		"category", "unit", "piecesPerUnit",
 	}
 
-	for i, h := range headers {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
-		f.SetCellValue(sheet, cell, h)
+	for index, header := range headers {
+		cell, _ := excelize.CoordinatesToCellName(index+1, 1)
+		spreadsheet.SetCellValue(sheetName, cell, header)
 	}
 
-	// One sample row so the user can see the expected format
-	sample := []interface{}{
+	sampleRow := []interface{}{
 		"Sample Product", "SKU001", "1234567890", 100, 70,
 		50, 10, 85, 20, "Drinks", "pcs", 1,
 	}
-	for i, v := range sample {
-		cell, _ := excelize.CoordinatesToCellName(i+1, 2)
-		f.SetCellValue(sheet, cell, v)
+	for index, value := range sampleRow {
+		cell, _ := excelize.CoordinatesToCellName(index+1, 2)
+		spreadsheet.SetCellValue(sheetName, cell, value)
 	}
 
-	buf, err := f.WriteToBuffer()
+	buffer, err := spreadsheet.WriteToBuffer()
 	if err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return buffer.Bytes(), nil
 }
 
-// parseFloat and parseInt are small helpers used inside UploadExcel.
-// They return zero on any parse error rather than crashing the upload.
-func parseFloat(s string) float64 {
-	var v float64
-	fmt.Sscanf(s, "%f", &v)
-	return v
+func parseFloat(value string) float64 {
+	var result float64
+	fmt.Sscanf(value, "%f", &result)
+	return result
 }
 
-func parseInt(s string) int {
-	var v int
-	fmt.Sscanf(s, "%d", &v)
-	return v
+func parseInt(value string) int {
+	var result int
+	fmt.Sscanf(value, "%d", &result)
+	return result
 }
