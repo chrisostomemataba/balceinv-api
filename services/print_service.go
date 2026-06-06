@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"fmt"
@@ -13,354 +14,409 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kenshaw/escpos"
+
 	"github.com/chrisostomemataba/balceinv-api/models"
 	"github.com/chrisostomemataba/balceinv-api/repository"
 )
 
 // PrintService writes ESC/POS receipts to a configured printer port.
-// It is intentionally stateless — every call reads the current settings
-// so that port changes in the settings UI take effect immediately.
+// Every call reads current settings so that port or paper-width changes
+// take effect immediately without restarting the server.
 type PrintService struct {
-	saleRepo     *repository.SaleRepository
-	settingsRepo *repository.SettingsRepository
+	saleRepository     *repository.SaleRepository
+	settingsRepository *repository.SettingsRepository
 }
 
 func NewPrintService(
-	saleRepo *repository.SaleRepository,
-	settingsRepo *repository.SettingsRepository,
+	saleRepository *repository.SaleRepository,
+	settingsRepository *repository.SettingsRepository,
 ) *PrintService {
-	return &PrintService{saleRepo: saleRepo, settingsRepo: settingsRepo}
+	return &PrintService{
+		saleRepository:     saleRepository,
+		settingsRepository: settingsRepository,
+	}
 }
 
-// PrintReceipt is the single entry point called after a sale completes.
-// It fetches the sale, loads settings+company, formats ESC/POS bytes,
-// writes them to the configured port, and optionally pulses the cash drawer.
-func (s *PrintService) PrintReceipt(saleID uint, openDrawer bool) error {
-	settings, err := s.settingsRepo.GetSettings()
+// columnCount returns the number of character columns for a given paper width.
+// At standard thermal font size: 58mm → 32 cols, 80mm → 48 cols.
+func columnCount(paperWidthMM int) int {
+	if paperWidthMM == 58 {
+		return 32
+	}
+	return 48
+}
+
+// PrintReceipt is the single public entry point called after a completed sale.
+func (service *PrintService) PrintReceipt(saleID uint, openDrawer bool) error {
+	settings, err := service.settingsRepository.GetSettings()
 	if err != nil {
 		return fmt.Errorf("could not load settings: %w", err)
 	}
 
-	// Respect the user's opt-in — if the printer is not enabled, do nothing.
 	if !settings.PrinterEnabled {
 		return nil
 	}
 
 	if settings.PrinterPort == "" {
-		return fmt.Errorf("printer port is not configured")
+		return fmt.Errorf("printer port is not configured in settings")
 	}
 
-	sale, err := s.saleRepo.FindByID(saleID)
+	sale, err := service.saleRepository.FindByID(saleID)
 	if err != nil {
-		return fmt.Errorf("sale not found: %w", err)
+		return fmt.Errorf("sale %d not found: %w", saleID, err)
 	}
 
-	cols := 48 // default 80mm paper
-	if settings.PrinterPaperWidth == 58 {
-		cols = 32
+	receiptBytes, err := service.buildReceipt(sale, settings, openDrawer)
+	if err != nil {
+		return fmt.Errorf("could not build receipt: %w", err)
 	}
 
-	buf := s.buildReceipt(sale, settings, cols)
-
-	// Pulse the cash drawer before the receipt cuts so the drawer is open
-	// by the time the cashier tears the receipt — standard POS behaviour.
-	// The drawer is wired to the printer DK port and triggered via ESC/POS.
-	if openDrawer && settings.OpenCashDrawer {
-		buf = append(buf, escDrawerKick()...)
-	}
-
-	return s.writeToPort(settings.PrinterPort, buf)
+	return service.writeToPort(settings.PrinterPort, receiptBytes)
 }
 
-// buildReceipt assembles the full ESC/POS byte sequence for the receipt.
-func (s *PrintService) buildReceipt(sale *models.Sale, settings *models.Settings, cols int) []byte {
-	var b []byte
-	company := settings.Company
-	currency := settings.Currency
+// buildReceipt assembles the full ESC/POS byte sequence.
+// Delegated into smaller sections to keep cognitive complexity low.
+func (service *PrintService) buildReceipt(
+	sale *models.Sale,
+	settings *models.Settings,
+	openDrawer bool,
+) ([]byte, error) {
+	columns := columnCount(settings.PrinterPaperWidth)
+	buffer := &bytes.Buffer{}
+	writer := bufio.NewWriter(buffer)
+	// escpos.New expects an io.ReadWriter. bytes.Buffer implements
+	// io.ReadWriter (Read and Write), while *bufio.Writer does not
+	// implement Read, so pass the underlying buffer.
+	printer := escpos.New(buffer)
 
-	// ── Printer init ────────────────────────────────────────────────────────
-	b = append(b, escInit()...)
+	printer.Init()
 
-	// ── Logo ────────────────────────────────────────────────────────────────
-	// Logo is stored as a data URI (data:image/png;base64,...).
-	// We decode and convert to ESC/POS raster bitmap.
-	if company.Logo != nil && *company.Logo != "" {
-		if logoBytes, err := logoFromDataURI(*company.Logo, cols); err == nil {
-			b = append(b, logoBytes...)
-			b = append(b, lf()...)
-		}
+	service.printLogo(printer, buffer, writer, settings.Company, columns)
+	service.printHeader(printer, settings.Company, columns)
+	service.printMeta(printer, sale, columns)
+	service.printItems(printer, sale, settings.Currency, columns)
+	service.printTotals(printer, sale, settings, columns)
+	service.printFooter(printer, settings.Company, columns)
+
+	if openDrawer && settings.OpenCashDrawer {
+		printer.Cut()
+		// ESC p — cash drawer kick pulse on pin 2
+		writer.Write([]byte{0x1B, 0x70, 0x00, 0x19, 0xFA})
+	} else {
+		printer.Cut()
 	}
 
-	// ── Header ──────────────────────────────────────────────────────────────
-	b = append(b, escCenter()...)
-	b = append(b, escBold(true)...)
-	b = append(b, escDoubleHeight(true)...)
-	b = append(b, []byte(center(company.Name, cols))...)
-	b = append(b, lf()...)
-	b = append(b, escDoubleHeight(false)...)
-	b = append(b, escBold(false)...)
+	printer.End()
+	writer.Flush()
+
+	return buffer.Bytes(), nil
+}
+
+// printLogo renders the company logo as a raster image if one is set.
+func (service *PrintService) printLogo(
+	printer *escpos.Escpos,
+	buffer *bytes.Buffer,
+	writer *bufio.Writer,
+	company models.Company,
+	columns int,
+) {
+	if company.Logo == nil || *company.Logo == "" {
+		return
+	}
+
+	logoBytes, err := renderLogoToRaster(*company.Logo, columns)
+	if err != nil {
+		return
+	}
+
+	writer.Flush()
+	buffer.Write(logoBytes)
+	printer.Formfeed()
+}
+
+// printHeader writes the business name, address, phone, TIN, and receipt header.
+func (service *PrintService) printHeader(
+	printer *escpos.Escpos,
+	company models.Company,
+	columns int,
+) {
+	printer.SetAlign("center")
+	printer.SetEmphasize(1)
+	printer.SetFontSize(2, 2)
+	printer.Write(company.Name + "\n")
+	printer.SetFontSize(1, 1)
+	printer.SetEmphasize(0)
 
 	if company.Address != nil && *company.Address != "" {
-		b = append(b, []byte(center(*company.Address, cols))...)
-		b = append(b, lf()...)
+		printer.Write(centerText(*company.Address, columns) + "\n")
 	}
 	if company.Phone != nil && *company.Phone != "" {
-		b = append(b, []byte(center("Tel: "+*company.Phone, cols))...)
-		b = append(b, lf()...)
+		printer.Write(centerText("Tel: "+*company.Phone, columns) + "\n")
 	}
 	if company.TIN != nil && *company.TIN != "" {
-		b = append(b, []byte(center("TIN: "+*company.TIN, cols))...)
-		b = append(b, lf()...)
+		printer.Write(centerText("TIN: "+*company.TIN, columns) + "\n")
 	}
-
 	if company.ReceiptHeader != nil && *company.ReceiptHeader != "" {
-		b = append(b, lf()...)
-		b = append(b, []byte(center(*company.ReceiptHeader, cols))...)
-		b = append(b, lf()...)
+		printer.Formfeed()
+		printer.Write(centerText(*company.ReceiptHeader, columns) + "\n")
 	}
+}
 
-	// ── Divider ─────────────────────────────────────────────────────────────
-	b = append(b, escLeft()...)
-	b = append(b, []byte(divider(cols, '-'))...)
-	b = append(b, lf()...)
+// printMeta writes receipt number, date, cashier, and payment type.
+func (service *PrintService) printMeta(
+	printer *escpos.Escpos,
+	sale *models.Sale,
+	columns int,
+) {
+	printer.SetAlign("left")
+	printer.Write(dividerLine(columns, '-') + "\n")
+	printer.Write(fmt.Sprintf("Receipt : %s\n", sale.ReceiptNumber))
+	printer.Write(fmt.Sprintf("Date    : %s\n", sale.CreatedAt.Format("02/01/2006 15:04")))
+	printer.Write(fmt.Sprintf("Cashier : %s\n", sale.User.Name))
+	printer.Write(fmt.Sprintf("Payment : %s\n", strings.ToUpper(sale.PaymentType)))
+	printer.Write(dividerLine(columns, '-') + "\n")
 
-	// ── Receipt meta ────────────────────────────────────────────────────────
-	b = append(b, []byte(fmt.Sprintf("Receipt : %s", sale.ReceiptNumber))...)
-	b = append(b, lf()...)
-	b = append(b, []byte(fmt.Sprintf("Date    : %s", sale.CreatedAt.Format("02/01/2006 15:04")))...)
-	b = append(b, lf()...)
-	b = append(b, []byte(fmt.Sprintf("Cashier : %s", sale.User.Name))...)
-	b = append(b, lf()...)
-	b = append(b, []byte(fmt.Sprintf("Payment : %s", strings.ToUpper(sale.PaymentType)))...)
-	b = append(b, lf()...)
+	printer.SetEmphasize(1)
+	printer.Write(leftRightText("Item", "Amount", columns) + "\n")
+	printer.SetEmphasize(0)
+	printer.Write(dividerLine(columns, '-') + "\n")
+}
 
-	// ── Divider ─────────────────────────────────────────────────────────────
-	b = append(b, []byte(divider(cols, '-'))...)
-	b = append(b, lf()...)
-
-	// ── Column headers ──────────────────────────────────────────────────────
-	b = append(b, escBold(true)...)
-	b = append(b, []byte(itemHeader(cols))...)
-	b = append(b, lf()...)
-	b = append(b, escBold(false)...)
-	b = append(b, []byte(divider(cols, '-'))...)
-	b = append(b, lf()...)
-
-	// ── Line items ──────────────────────────────────────────────────────────
+// printItems writes each sale line item.
+func (service *PrintService) printItems(
+	printer *escpos.Escpos,
+	sale *models.Sale,
+	currency string,
+	columns int,
+) {
 	for _, item := range sale.Items {
-		name := item.Product.Name
-		if len(name) > cols {
-			name = name[:cols-1]
+		productName := item.Product.Name
+		if len(productName) > columns {
+			productName = productName[:columns-1]
 		}
-		b = append(b, []byte(name)...)
-		b = append(b, lf()...)
+		printer.Write(productName + "\n")
 
-		qtyPrice := fmt.Sprintf("  %d x %s %s",
+		wholesaleMarker := ""
+		if item.IsWholesale {
+			wholesaleMarker = " [W]"
+		}
+
+		quantityAndPrice := fmt.Sprintf(
+			"  %d x %s%s",
 			item.Quantity,
-			formatAmount(item.UnitPrice, currency),
-			wholesaleTag(item.IsWholesale),
+			formatReceiptAmount(item.UnitPrice, currency),
+			wholesaleMarker,
 		)
-		total := formatAmount(item.TotalPrice, currency)
-		b = append(b, []byte(leftRight(qtyPrice, total, cols))...)
-		b = append(b, lf()...)
+		printer.Write(leftRightText(quantityAndPrice, formatReceiptAmount(item.TotalPrice, currency), columns) + "\n")
 	}
+}
 
-	// ── Divider ─────────────────────────────────────────────────────────────
-	b = append(b, []byte(divider(cols, '-'))...)
-	b = append(b, lf()...)
+// printTotals writes subtotal, optional VAT line, and the grand total.
+func (service *PrintService) printTotals(
+	printer *escpos.Escpos,
+	sale *models.Sale,
+	settings *models.Settings,
+	columns int,
+) {
+	printer.Write(dividerLine(columns, '-') + "\n")
 
-	// ── Totals ──────────────────────────────────────────────────────────────
 	subtotal := sale.TotalAmount - sale.TaxAmount
-	b = append(b, []byte(leftRight("Subtotal", formatAmount(subtotal, currency), cols))...)
-	b = append(b, lf()...)
+	printer.Write(leftRightText("Subtotal", formatReceiptAmount(subtotal, settings.Currency), columns) + "\n")
 
 	if settings.ShowTaxOnReceipt {
 		taxLabel := fmt.Sprintf("VAT (%.0f%%)", settings.TaxRate)
-		b = append(b, []byte(leftRight(taxLabel, formatAmount(sale.TaxAmount, currency), cols))...)
-		b = append(b, lf()...)
+		printer.Write(leftRightText(taxLabel, formatReceiptAmount(sale.TaxAmount, settings.Currency), columns) + "\n")
 	}
 
-	b = append(b, []byte(divider(cols, '='))...)
-	b = append(b, lf()...)
-
-	b = append(b, escBold(true)...)
-	b = append(b, []byte(leftRight("TOTAL", formatAmount(sale.TotalAmount, currency), cols))...)
-	b = append(b, lf()...)
-	b = append(b, escBold(false)...)
-
-	// ── Footer ──────────────────────────────────────────────────────────────
-	b = append(b, lf()...)
-
-	if company.ReceiptFooter != nil && *company.ReceiptFooter != "" {
-		b = append(b, escCenter()...)
-		b = append(b, []byte(center(*company.ReceiptFooter, cols))...)
-		b = append(b, lf()...)
-		b = append(b, escLeft()...)
-	}
-
-	b = append(b, escCenter()...)
-	b = append(b, []byte(center(time.Now().Format("02/01/2006 15:04:05"), cols))...)
-	b = append(b, lf()...)
-	b = append(b, lf()...)
-	b = append(b, lf()...)
-
-	// ── Paper cut ───────────────────────────────────────────────────────────
-	b = append(b, escCut()...)
-
-	return b
+	printer.Write(dividerLine(columns, '=') + "\n")
+	printer.SetEmphasize(1)
+	printer.Write(leftRightText("TOTAL", formatReceiptAmount(sale.TotalAmount, settings.Currency), columns) + "\n")
+	printer.SetEmphasize(0)
 }
 
-// writeToPort opens the printer device file and writes the ESC/POS bytes.
-// On Windows the port is "COM3", "COM4" etc.
-// On Linux it is "/dev/usb/lp0" (USB) or "/dev/ttyUSB0" (serial).
-func (s *PrintService) writeToPort(port string, data []byte) error {
-	f, err := os.OpenFile(port, os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("cannot open printer port %s: %w", port, err)
-	}
-	defer f.Close()
+// printFooter writes the receipt footer text and timestamp.
+func (service *PrintService) printFooter(
+	printer *escpos.Escpos,
+	company models.Company,
+	columns int,
+) {
+	printer.Formfeed()
+	printer.SetAlign("center")
 
-	_, err = f.Write(data)
+	if company.ReceiptFooter != nil && *company.ReceiptFooter != "" {
+		printer.Write(centerText(*company.ReceiptFooter, columns) + "\n")
+	}
+
+	printer.Write(centerText(time.Now().Format("02/01/2006 15:04:05"), columns) + "\n")
+	printer.Formfeed()
+	printer.Formfeed()
+}
+
+// writeToPort opens the OS printer device file and writes the byte stream.
+// Linux: /dev/usb/lp0 (USB) or /dev/ttyUSB0 (serial).
+// Windows: COM3, COM4, etc.
+func (service *PrintService) writeToPort(portPath string, receiptData []byte) error {
+	portFile, err := os.OpenFile(portPath, os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("write to printer failed: %w", err)
+		return fmt.Errorf("cannot open printer port %s: %w", portPath, err)
+	}
+	defer portFile.Close()
+
+	_, err = portFile.Write(receiptData)
+	if err != nil {
+		return fmt.Errorf("write to printer port failed: %w", err)
 	}
 	return nil
 }
 
-// ── ESC/POS command helpers ──────────────────────────────────────────────────
+// ── Layout helpers ─────────────────────────────────────────────────────────
 
-func escInit() []byte       { return []byte{0x1B, 0x40} }
-func lf() []byte            { return []byte{0x0A} }
-func escCenter() []byte     { return []byte{0x1B, 0x61, 0x01} }
-func escLeft() []byte       { return []byte{0x1B, 0x61, 0x00} }
-func escCut() []byte        { return []byte{0x1D, 0x56, 0x41, 0x00} }
-func escDrawerKick() []byte { return []byte{0x1B, 0x70, 0x00, 0x19, 0xFA} }
+func dividerLine(columns int, char rune) string {
+	return strings.Repeat(string(char), columns)
+}
 
-func escBold(on bool) []byte {
-	if on {
-		return []byte{0x1B, 0x45, 0x01}
+func centerText(text string, columns int) string {
+	if len(text) >= columns {
+		return text
 	}
-	return []byte{0x1B, 0x45, 0x00}
+	paddingSize := (columns - len(text)) / 2
+	return strings.Repeat(" ", paddingSize) + text
 }
 
-func escDoubleHeight(on bool) []byte {
-	if on {
-		return []byte{0x1D, 0x21, 0x01}
+func leftRightText(leftText, rightText string, columns int) string {
+	spacingSize := columns - len(leftText) - len(rightText)
+	if spacingSize < 1 {
+		spacingSize = 1
 	}
-	return []byte{0x1D, 0x21, 0x00}
+	return leftText + strings.Repeat(" ", spacingSize) + rightText
 }
 
-// ── Layout helpers ───────────────────────────────────────────────────────────
-
-func divider(cols int, char rune) string {
-	return strings.Repeat(string(char), cols)
-}
-
-func center(s string, cols int) string {
-	if len(s) >= cols {
-		return s
-	}
-	pad := (cols - len(s)) / 2
-	return strings.Repeat(" ", pad) + s
-}
-
-func leftRight(left, right string, cols int) string {
-	space := cols - len(left) - len(right)
-	if space < 1 {
-		space = 1
-	}
-	return left + strings.Repeat(" ", space) + right
-}
-
-func itemHeader(cols int) string {
-	return leftRight("Item", "Amount", cols)
-}
-
-func formatAmount(amount float64, currency string) string {
-	formatted := fmt.Sprintf("%.0f", amount)
-	n := len(formatted)
+func formatReceiptAmount(amount float64, currency string) string {
+	raw := fmt.Sprintf("%.0f", amount)
+	runes := []rune(raw)
+	total := len(runes)
 	result := ""
-	for i, ch := range formatted {
-		if i > 0 && (n-i)%3 == 0 {
+	for index, character := range runes {
+		if index > 0 && (total-index)%3 == 0 {
 			result += ","
 		}
-		result += string(ch)
+		result += string(character)
 	}
 	return currency + " " + result
 }
 
-func wholesaleTag(isWholesale bool) string {
-	if isWholesale {
-		return "[W]"
+// ── Logo rendering ─────────────────────────────────────────────────────────
+
+// renderLogoToRaster decodes a base64 data URI and converts to ESC/POS
+// GS v 0 raster format, scaled to fit the receipt width.
+func renderLogoToRaster(dataURI string, columns int) ([]byte, error) {
+	imageBytes, err := decodeDataURI(dataURI)
+	if err != nil {
+		return nil, err
 	}
-	return ""
+
+	sourceImage, err := decodeImage(imageBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildRasterCommand(sourceImage, columns), nil
 }
 
-// ── Logo rendering ───────────────────────────────────────────────────────────
-
-// logoFromDataURI decodes a base64 data URI image and converts it to
-// ESC/POS raster bit-image commands (GS v 0). The image is scaled to
-// fit within the receipt width and converted to 1-bit black/white.
-func logoFromDataURI(dataURI string, cols int) ([]byte, error) {
-	idx := strings.Index(dataURI, ",")
-	if idx < 0 {
-		return nil, fmt.Errorf("invalid data URI")
+func decodeDataURI(dataURI string) ([]byte, error) {
+	separatorIndex := strings.Index(dataURI, ",")
+	if separatorIndex < 0 {
+		return nil, fmt.Errorf("invalid data URI: missing comma separator")
 	}
-
-	imgBytes, err := base64.StdEncoding.DecodeString(dataURI[idx+1:])
+	decoded, err := base64.StdEncoding.DecodeString(dataURI[separatorIndex+1:])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
 	}
+	return decoded, nil
+}
 
-	img, _, err := image.Decode(bytes.NewReader(imgBytes))
+func decodeImage(imageBytes []byte) (image.Image, error) {
+	sourceImage, _, err := image.Decode(bytes.NewReader(imageBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("image decode failed: %w", err)
+	}
+	return sourceImage, nil
+}
+
+func buildRasterCommand(sourceImage image.Image, columns int) []byte {
+	targetWidthDots := columns * 8
+	if targetWidthDots > 576 {
+		targetWidthDots = 576
 	}
 
-	// Target width in dots: cols × 8, capped at 576 (80mm @203dpi)
-	targetWidth := cols * 8
-	if targetWidth > 576 {
-		targetWidth = 576
-	}
+	bounds := sourceImage.Bounds()
+	sourceWidth := bounds.Max.X - bounds.Min.X
+	sourceHeight := bounds.Max.Y - bounds.Min.Y
 
-	bounds := img.Bounds()
-	origW := bounds.Max.X - bounds.Min.X
-	origH := bounds.Max.Y - bounds.Min.Y
+	scale := float64(targetWidthDots) / float64(sourceWidth)
+	targetHeightDots := int(math.Round(float64(sourceHeight) * scale))
 
-	scale := float64(targetWidth) / float64(origW)
-	targetHeight := int(math.Round(float64(origH) * scale))
+	widthBytes := (targetWidthDots + 7) / 8
+	rasterData := convertToMonochrome(sourceImage, bounds, MonochromeParams{
+		sourceWidth:     sourceWidth,
+		sourceHeight:    sourceHeight,
+		targetWidthDots: targetWidthDots,
+		targetHeightDots: targetHeightDots,
+		widthBytes:      widthBytes,
+		scale:           scale,
+	})
 
-	widthBytes := (targetWidth + 7) / 8
-	raster := make([]byte, widthBytes*targetHeight)
+	xLow := byte(widthBytes & 0xFF)
+	xHigh := byte((widthBytes >> 8) & 0xFF)
+	yLow := byte(targetHeightDots & 0xFF)
+	yHigh := byte((targetHeightDots >> 8) & 0xFF)
 
-	for y := 0; y < targetHeight; y++ {
-		for x := 0; x < targetWidth; x++ {
-			srcX := int(float64(x) / scale)
-			srcY := int(float64(y) / scale)
-			if srcX >= origW {
-				srcX = origW - 1
-			}
-			if srcY >= origH {
-				srcY = origH - 1
-			}
+	command := []byte{0x1D, 0x76, 0x30, 0x00, xLow, xHigh, yLow, yHigh}
+	return append(command, rasterData...)
+}
 
-			r, g, bVal, _ := img.At(bounds.Min.X+srcX, bounds.Min.Y+srcY).RGBA()
-			gray := color.Gray{Y: uint8((r*299 + g*587 + bVal*114) / 1000 / 256)}
+type MonochromeParams struct {
+	sourceWidth      int
+	sourceHeight     int
+	targetWidthDots  int
+	targetHeightDots int
+	widthBytes       int
+	scale            float64
+}
+
+func convertToMonochrome(
+	sourceImage image.Image,
+	bounds image.Rectangle,
+	params MonochromeParams,
+) []byte {
+	rasterData := make([]byte, params.widthBytes*params.targetHeightDots)
+
+	for targetY := 0; targetY < params.targetHeightDots; targetY++ {
+		for targetX := 0; targetX < params.targetWidthDots; targetX++ {
+			sourceX := clampInt(int(float64(targetX)/params.scale), 0, params.sourceWidth-1)
+			sourceY := clampInt(int(float64(targetY)/params.scale), 0, params.sourceHeight-1)
+
+			red, green, blue, _ := sourceImage.At(bounds.Min.X+sourceX, bounds.Min.Y+sourceY).RGBA()
+			gray := color.Gray{Y: uint8((red*299 + green*587 + blue*114) / 1000 / 256)}
+
 			if gray.Y < 128 {
-				byteIdx := y*widthBytes + x/8
-				bitIdx := uint(7 - (x % 8))
-				raster[byteIdx] |= 1 << bitIdx
+				bytePos := targetY*params.widthBytes + targetX/8
+				bitPos := uint(7 - (targetX % 8))
+				rasterData[bytePos] |= 1 << bitPos
 			}
 		}
 	}
 
-	// GS v 0: 1D 76 30 m xL xH yL yH [data]
-	xL := byte(widthBytes & 0xFF)
-	xH := byte((widthBytes >> 8) & 0xFF)
-	yL := byte(targetHeight & 0xFF)
-	yH := byte((targetHeight >> 8) & 0xFF)
+	return rasterData
+}
 
-	cmd := []byte{0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH}
-	cmd = append(cmd, raster...)
-	return cmd, nil
+func clampInt(value, minimum, maximum int) int {
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
 }
