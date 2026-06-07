@@ -23,7 +23,6 @@ type SaleService struct {
 	notificationService *NotificationService
 }
 
-// Update NewSaleService signature
 func NewSaleService(
 	repo *repository.SaleRepository,
 	productRepo *repository.ProductRepository,
@@ -39,9 +38,10 @@ func NewSaleService(
 }
 
 type SaleItemInput struct {
-	ProductID   uint `json:"productId"`
-	Quantity    int  `json:"quantity"`
-	IsWholesale bool `json:"isWholesale"`
+	ProductID   uint     `json:"productId"`
+	Quantity    int      `json:"quantity"`
+	IsWholesale bool     `json:"isWholesale"`
+	UnitPrice   *float64 `json:"unitPrice"`
 }
 
 type CreateSaleInput struct {
@@ -89,12 +89,7 @@ func (s *SaleService) GetDailySummary(date time.Time) (map[string]interface{}, e
 		return nil, err
 	}
 
-	totalRevenue := 0.0
-	totalTax := 0.0
-	for _, sale := range sales {
-		totalRevenue += sale.TotalAmount
-		totalTax += sale.TaxAmount
-	}
+	totalRevenue, totalTax := sumSaleTotals(sales)
 
 	return map[string]interface{}{
 		"sales":              sales,
@@ -113,12 +108,7 @@ func (s *SaleService) GetMonthlySummary(year, month int) (map[string]interface{}
 		return nil, err
 	}
 
-	totalRevenue := 0.0
-	totalTax := 0.0
-	for _, sale := range sales {
-		totalRevenue += sale.TotalAmount
-		totalTax += sale.TaxAmount
-	}
+	totalRevenue, totalTax := sumSaleTotals(sales)
 
 	avg := 0.0
 	if len(sales) > 0 {
@@ -134,48 +124,23 @@ func (s *SaleService) GetMonthlySummary(year, month int) (map[string]interface{}
 	}, nil
 }
 
-// CreateSale is the heart of the POS system. It fetches all products, validates
-// stock, calculates totals, generates the receipt number, and commits everything
-// in one transaction via the repository layer.
+// CreateSale is the entry point for the POS checkout flow.
+// It validates stock, calculates totals, and commits the sale atomically.
 func (s *SaleService) CreateSale(input CreateSaleInput) (*SaleResult, error) {
 	settings, _ := s.settingsRepo.GetSettings()
 
-	// Resolve each product and check stock before touching the database
-	resolved := make([]resolvedItem, 0, len(input.Items))
-	for _, item := range input.Items {
-		product, err := s.productRepo.FindByID(item.ProductID)
-		if err != nil {
-			return nil, fmt.Errorf("product with ID %d not found", item.ProductID)
-		}
-		if product.Quantity < item.Quantity {
-			return nil, fmt.Errorf("insufficient stock for %s", product.Name)
-		}
-		resolved = append(resolved, resolvedItem{input: item, product: *product})
+	resolved, err := s.resolveItems(input.Items)
+	if err != nil {
+		return nil, err
 	}
 
-	// Calculate the total — tax is already included in the price (inclusive VAT)
-	taxRate := 18.0
-	if settings != nil {
-		taxRate = settings.TaxRate
-	}
-
-	total := 0.0
-	for _, r := range resolved {
-		price := r.product.Price
-		if r.input.IsWholesale && r.product.WholesalePrice != nil {
-			price = *r.product.WholesalePrice
-		}
-		total += price * float64(r.input.Quantity)
-	}
+	taxRate := taxRateFromSettings(settings)
+	total := calculateTotal(resolved)
 	taxAmount := total * (taxRate / (100 + taxRate))
 
-	// Validate cash payment covers the total
-	change := 0.0
-	if input.PaymentType == "cash" && input.AmountPaid > 0 {
-		change = input.AmountPaid - total
-		if change < 0 {
-			return nil, fmt.Errorf("insufficient payment. required: %.2f, paid: %.2f", total, input.AmountPaid)
-		}
+	change, err := validatePayment(input.PaymentType, input.AmountPaid, total)
+	if err != nil {
+		return nil, err
 	}
 
 	receiptNumber, err := s.generateReceiptNumber(settings)
@@ -183,67 +148,14 @@ func (s *SaleService) CreateSale(input CreateSaleInput) (*SaleResult, error) {
 		return nil, err
 	}
 
-	saleType := input.SaleType
-	if saleType == "" {
-		saleType = "retail"
-	}
-
-	sale := &models.Sale{
-		UserID:        input.UserID,
-		ReceiptNumber: receiptNumber,
-		TotalAmount:   total,
-		TaxAmount:     taxAmount,
-		PaymentType:   input.PaymentType,
-		SaleType:      saleType,
-	}
-
-	// Build the sale items, stock deductions, and movement records before the transaction
-	saleItems := make([]models.SaleItem, 0, len(resolved))
-	movements := make([]models.StockMovement, 0, len(resolved))
-	stockUpdates := map[uint]int{}
-
-	ref := receiptNumber
-	for _, r := range resolved {
-		price := r.product.Price
-		if r.input.IsWholesale && r.product.WholesalePrice != nil {
-			price = *r.product.WholesalePrice
-		}
-		lineTotal := price * float64(r.input.Quantity)
-		newQty := r.product.Quantity - r.input.Quantity
-
-		saleItems = append(saleItems, models.SaleItem{
-			ProductID:   r.product.ID,
-			Quantity:    r.input.Quantity,
-			UnitPrice:   price,
-			TotalPrice:  lineTotal,
-			IsWholesale: r.input.IsWholesale,
-		})
-
-		stockUpdates[r.product.ID] = newQty
-
-		movements = append(movements, models.StockMovement{
-			ProductID:   r.product.ID,
-			Change:      -r.input.Quantity,
-			NewQuantity: newQty,
-			Reason:      "sale",
-			Reference:   &ref,
-			UserID:      &input.UserID,
-		})
-	}
+	sale := s.buildSaleRecord(input, receiptNumber, total, taxAmount)
+	saleItems, movements, stockUpdates := s.buildTransactionData(resolved, receiptNumber)
 
 	if err := s.repo.CreateWithItems(sale, saleItems, movements, stockUpdates); err != nil {
 		return nil, err
 	}
 
-	// After s.repo.CreateWithItems succeeds, check stock levels for affected products.
-	// This is what triggers notifications to appear in the frontend without any manual action.
-	soldProductIDs := make([]uint, 0, len(resolved))
-	for _, r := range resolved {
-		soldProductIDs = append(soldProductIDs, r.product.ID)
-	}
-	// We deliberately ignore the error here — a failed stock check should never
-	// cause a completed sale to return an error to the cashier.
-	_ = s.notificationService.CheckStockLevels(soldProductIDs)
+	s.triggerStockCheck(resolved)
 
 	return &SaleResult{
 		ID:            sale.ID,
@@ -255,6 +167,90 @@ func (s *SaleService) CreateSale(input CreateSaleInput) (*SaleResult, error) {
 		Change:        change,
 		ReceiptData:   s.buildReceiptData(sale, resolved, settings, change, taxRate),
 	}, nil
+}
+
+// resolveItems loads each product from the database and validates stock.
+func (s *SaleService) resolveItems(items []SaleItemInput) ([]resolvedItem, error) {
+	resolved := make([]resolvedItem, 0, len(items))
+	for _, item := range items {
+		product, err := s.productRepo.FindByID(item.ProductID)
+		if err != nil {
+			return nil, fmt.Errorf("product with ID %d not found", item.ProductID)
+		}
+		if product.Quantity < item.Quantity {
+			return nil, fmt.Errorf("insufficient stock for %s", product.Name)
+		}
+		resolved = append(resolved, resolvedItem{input: item, product: *product})
+	}
+	return resolved, nil
+}
+
+// buildSaleRecord constructs the Sale model without persisting it.
+func (s *SaleService) buildSaleRecord(input CreateSaleInput, receiptNumber string, total, taxAmount float64) *models.Sale {
+	saleType := input.SaleType
+	if saleType == "" {
+		saleType = "retail"
+	}
+	return &models.Sale{
+		UserID:        input.UserID,
+		ReceiptNumber: receiptNumber,
+		TotalAmount:   total,
+		TaxAmount:     taxAmount,
+		PaymentType:   input.PaymentType,
+		SaleType:      saleType,
+	}
+}
+
+// buildTransactionData constructs the sale items, stock movements, and stock
+// update map needed by the repository transaction. The effective unit price
+// is resolved once here and used consistently for both the sale item record
+// and the line total — so the receipt price always matches what the cashier charged.
+func (s *SaleService) buildTransactionData(
+	resolved []resolvedItem,
+	receiptNumber string,
+) ([]models.SaleItem, []models.StockMovement, map[uint]int) {
+	saleItems := make([]models.SaleItem, 0, len(resolved))
+	movements := make([]models.StockMovement, 0, len(resolved))
+	stockUpdates := map[uint]int{}
+
+	for _, r := range resolved {
+		effectivePrice := resolveEffectivePrice(r)
+		lineTotal := effectivePrice * float64(r.input.Quantity)
+		newQuantity := r.product.Quantity - r.input.Quantity
+		ref := receiptNumber
+
+		saleItems = append(saleItems, models.SaleItem{
+			ProductID:   r.product.ID,
+			Quantity:    r.input.Quantity,
+			UnitPrice:   effectivePrice,
+			TotalPrice:  lineTotal,
+			IsWholesale: r.input.IsWholesale,
+		})
+
+		stockUpdates[r.product.ID] = newQuantity
+
+		movements = append(movements, models.StockMovement{
+			ProductID:   r.product.ID,
+			Change:      -r.input.Quantity,
+			NewQuantity: newQuantity,
+			Reason:      "sale",
+			Reference:   &ref,
+			UserID:      &r.input.ProductID,
+		})
+	}
+
+	return saleItems, movements, stockUpdates
+}
+
+// triggerStockCheck runs the notification check after a successful sale.
+// Errors are intentionally ignored — a failed stock check must never
+// roll back a completed sale or show an error to the cashier.
+func (s *SaleService) triggerStockCheck(resolved []resolvedItem) {
+	productIDs := make([]uint, 0, len(resolved))
+	for _, r := range resolved {
+		productIDs = append(productIDs, r.product.ID)
+	}
+	_ = s.notificationService.CheckStockLevels(productIDs)
 }
 
 func (s *SaleService) generateReceiptNumber(settings *models.Settings) (string, error) {
@@ -303,16 +299,13 @@ func (s *SaleService) buildReceiptData(
 
 	items := make([]map[string]interface{}, 0, len(resolved))
 	for _, r := range resolved {
-		price := r.product.Price
-		if r.input.IsWholesale && r.product.WholesalePrice != nil {
-			price = *r.product.WholesalePrice
-		}
+		effectivePrice := resolveEffectivePrice(r)
 		items = append(items, map[string]interface{}{
 			"name":         r.product.Name,
 			"sku":          r.product.SKU,
 			"quantity":     r.input.Quantity,
-			"unit_price":   price,
-			"total":        price * float64(r.input.Quantity),
+			"unit_price":   effectivePrice,
+			"total":        effectivePrice * float64(r.input.Quantity),
 			"is_wholesale": r.input.IsWholesale,
 		})
 	}
@@ -331,4 +324,59 @@ func (s *SaleService) buildReceiptData(
 		"currency":       currency,
 		"receipt_footer": footer,
 	}
+}
+
+// ── Package-level helpers ─────────────────────────────────────────────────
+
+// resolveEffectivePrice returns the price to use for a sale item.
+// Priority: frontend-provided unit price (includes discounts and addons) →
+// wholesale price → standard product price.
+func resolveEffectivePrice(r resolvedItem) float64 {
+	if r.input.UnitPrice != nil && *r.input.UnitPrice > 0 {
+		return *r.input.UnitPrice
+	}
+	if r.input.IsWholesale && r.product.WholesalePrice != nil {
+		return *r.product.WholesalePrice
+	}
+	return r.product.Price
+}
+
+// calculateTotal sums the line totals for all resolved items using
+// the effective price for each — same resolution order as resolveEffectivePrice.
+func calculateTotal(resolved []resolvedItem) float64 {
+	total := 0.0
+	for _, r := range resolved {
+		total += resolveEffectivePrice(r) * float64(r.input.Quantity)
+	}
+	return total
+}
+
+// validatePayment checks whether the cash payment covers the total.
+// Returns the change due, or an error if the amount is insufficient.
+func validatePayment(paymentType string, amountPaid, total float64) (float64, error) {
+	if paymentType != "cash" || amountPaid <= 0 {
+		return 0, nil
+	}
+	change := amountPaid - total
+	if change < 0 {
+		return 0, fmt.Errorf("insufficient payment. required: %.2f, paid: %.2f", total, amountPaid)
+	}
+	return change, nil
+}
+
+// taxRateFromSettings returns the configured tax rate or the default of 18%.
+func taxRateFromSettings(settings *models.Settings) float64 {
+	if settings != nil {
+		return settings.TaxRate
+	}
+	return 18.0
+}
+
+// sumSaleTotals aggregates revenue and tax across a slice of sales.
+func sumSaleTotals(sales []models.Sale) (totalRevenue, totalTax float64) {
+	for _, sale := range sales {
+		totalRevenue += sale.TotalAmount
+		totalTax += sale.TaxAmount
+	}
+	return
 }
