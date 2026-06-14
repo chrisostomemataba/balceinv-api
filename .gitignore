@@ -10,3 +10,8 @@ balceinv-api
 
 # Go build cache
 /vendor
+
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
